@@ -2,13 +2,190 @@ import streamlit as st
 import os
 from PIL import Image
 import pandas as pd
-from modules.ingredient_detector import IngredientDetector
-from modules.recipe_finder import RecipeFinder
-from modules.shopping_list import ShoppingList
+import sys
 import tempfile
 import matplotlib.pyplot as plt
 
-# Page config
+# ============================================
+# ADD ERROR HANDLING AND IMPORT FIXES FIRST
+# ============================================
+import warnings
+
+# Try to import torch with error handling
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    warnings.warn("Torch not available, using fallback detection")
+
+# ============================================
+# DEFINE INGREDIENT DETECTOR CLASS HERE
+# ============================================
+class IngredientDetector:
+    def __init__(self):
+        self.model = None
+        self.ingredient_classes = self._get_food_classes()
+        
+        # Try to load YOLO if torch is available
+        if TORCH_AVAILABLE:
+            try:
+                # Use ultralytics YOLO (more reliable)
+                from ultralytics import YOLO
+                # Use the smallest model for faster loading
+                self.model = YOLO('yolov8n.pt')
+                print("✅ YOLO model loaded successfully")
+            except Exception as e:
+                print(f"⚠️ Failed to load YOLO model: {e}")
+                self.model = None
+        else:
+            print("ℹ️ Torch not available, using fallback methods only")
+    
+    def _get_food_classes(self):
+        """Map COCO classes to food ingredients"""
+        food_mapping = {
+            'apple': 'apple',
+            'banana': 'banana',
+            'orange': 'orange',
+            'broccoli': 'broccoli',
+            'carrot': 'carrot',
+            'hot dog': 'sausage',
+            'pizza': 'pizza',
+            'donut': 'donut',
+            'cake': 'cake',
+            'sandwich': 'sandwich',
+            'bowl': 'bowl',
+            'bottle': 'bottle',
+            'wine glass': 'wine',
+            'cup': 'cup',
+        }
+        return food_mapping
+    
+    def detect_from_image(self, image_path):
+        """Detect ingredients from image"""
+        detections = []
+        
+        # Try YOLO detection first
+        if self.model is not None:
+            try:
+                results = self.model(image_path, verbose=False)
+                
+                for result in results:
+                    if result.boxes is not None:
+                        for box in result.boxes:
+                            cls = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = result.names[cls]
+                            
+                            # Filter to only food-related items
+                            if class_name in self.ingredient_classes:
+                                ingredient = self.ingredient_classes[class_name]
+                                detections.append({
+                                    'ingredient': ingredient,
+                                    'confidence': conf,
+                                    'bbox': box.xyxy[0].tolist()
+                                })
+                
+                if detections:
+                    print(f"✅ YOLO detected {len(detections)} items")
+                    return detections
+                    
+            except Exception as e:
+                print(f"❌ YOLO detection error: {e}")
+        
+        # Fallback: simple color-based detection
+        return self._detect_fallback(image_path)
+    
+    def _detect_fallback(self, image_path):
+        """Simple fallback when YOLO fails"""
+        try:
+            import cv2
+            import numpy as np
+            
+            image = cv2.imread(image_path)
+            if image is None:
+                return []
+                
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+            detections = []
+            
+            # Check for various colors
+            color_ranges = [
+                ('tomato', [0, 100, 100], [10, 255, 255]),  # Red
+                ('vegetable', [35, 100, 100], [85, 255, 255]),  # Green
+                ('lemon', [20, 100, 100], [30, 255, 255]),  # Yellow
+                ('orange', [10, 100, 100], [20, 255, 255]),  # Orange
+            ]
+            
+            for name, lower, upper in color_ranges:
+                mask = cv2.inRange(hsv, np.array(lower), np.array(upper))
+                if cv2.countNonZero(mask) > 100:
+                    detections.append({
+                        'ingredient': name,
+                        'confidence': 0.5,
+                        'bbox': [0, 0, 100, 100]
+                    })
+            
+            return detections
+            
+        except Exception as e:
+            print(f"❌ Fallback detection error: {e}")
+            return []
+    
+    def draw_detections(self, image_path, detections):
+        """Draw bounding boxes on image"""
+        try:
+            import cv2
+            img = cv2.imread(image_path)
+            if img is None:
+                return None
+                
+            for det in detections:
+                if 'bbox' in det and len(det['bbox']) >= 4:
+                    x1, y1, x2, y2 = map(int, det['bbox'][:4])
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    label = f"{det['ingredient']} ({det['confidence']:.2f})"
+                    cv2.putText(img, label, (x1, y1-10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            return img
+        except:
+            return None
+
+# ============================================
+# NOW IMPORT THE OTHER MODULES
+# ============================================
+try:
+    from modules.recipe_finder import RecipeFinder
+    from modules.shopping_list import ShoppingList
+except ImportError:
+    # Define fallback classes if modules not found
+    print("⚠️ Could not import modules, using fallback classes")
+    
+    class RecipeFinder:
+        def __init__(self):
+            self.api_key = os.getenv('SPOONACULAR_API_KEY', st.secrets.get("SPOONACULAR_API_KEY", ""))
+        
+        def find_recipes_by_ingredients(self, ingredients, number=5):
+            import requests
+            url = "https://api.spoonacular.com/recipes/findByIngredients"
+            params = {
+                'ingredients': ','.join(ingredients),
+                'number': number,
+                'apiKey': self.api_key
+            }
+            response = requests.get(url, params=params)
+            return response.json() if response.status_code == 200 else []
+    
+    class ShoppingList:
+        def generate_shopping_list(self, recipe, available_ingredients):
+            return recipe.get('missedIngredients', [])
+        
+        def _categorize_items(self, items):
+            return {'All Items': items}
+
+# ============================================
+# PAGE CONFIGURATION
+# ============================================
 st.set_page_config(
     page_title="AI Cook Assistant",
     page_icon="🍳",
@@ -43,21 +220,44 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize modules
+# ============================================
+# INITIALIZE MODULES WITH ERROR HANDLING
+# ============================================
 @st.cache_resource
 def load_models():
-    return IngredientDetector()
+    try:
+        detector = IngredientDetector()
+        return detector
+    except Exception as e:
+        st.warning(f"⚠️ Model loading had issues: {e}")
+        # Return a basic detector
+        class BasicDetector:
+            def detect_from_image(self, image_path):
+                return []
+            def draw_detections(self, image_path, detections):
+                return None
+        return BasicDetector()
 
 detector = load_models()
 recipe_finder = RecipeFinder()
 shopping_list = ShoppingList()
 
-# App header
+# ============================================
+# APP HEADER
+# ============================================
 st.markdown('<h1 class="main-header">🥘 AI Personal Cook Assistant</h1>', unsafe_allow_html=True)
 
-# Sidebar
+# ============================================
+# SIDEBAR
+# ============================================
 with st.sidebar:
     st.header("⚙️ Settings")
+    
+    # Check if API key is available
+    api_key = os.getenv('SPOONACULAR_API_KEY', st.secrets.get("SPOONACULAR_API_KEY", ""))
+    if not api_key:
+        st.error("⚠️ SPOONACULAR_API_KEY not found!")
+        st.info("Add it to Streamlit secrets: Settings → Secrets")
     
     # Manual ingredient input
     st.subheader("Add Ingredients Manually")
@@ -66,12 +266,16 @@ with st.sidebar:
         placeholder="e.g., tomato, onion, chicken"
     )
     
-    if manual_ingredients:
+    if manual_ingredients and st.button("Add Ingredients"):
         manual_list = [i.strip() for i in manual_ingredients.split(',')]
         if 'ingredients' in st.session_state:
             st.session_state.ingredients.extend(manual_list)
+            # Remove duplicates
+            st.session_state.ingredients = list(set(st.session_state.ingredients))
         else:
             st.session_state.ingredients = manual_list
+        st.success(f"Added {len(manual_list)} ingredients!")
+        st.rerun()
     
     # Dietary preferences
     st.subheader("Dietary Preferences")
@@ -82,8 +286,17 @@ with st.sidebar:
     
     # Max prep time
     max_time = st.slider("Max Preparation Time (minutes)", 10, 120, 30)
+    
+    # Clear all button in sidebar too
+    if st.button("Clear All Ingredients"):
+        if 'ingredients' in st.session_state:
+            st.session_state.ingredients = []
+            st.success("All ingredients cleared!")
+            st.rerun()
 
-# Main content tabs
+# ============================================
+# MAIN CONTENT TABS
+# ============================================
 tab1, tab2, tab3 = st.tabs(["📸 Upload Image", "🍽️ Recipe Suggestions", "🛒 Shopping List"])
 
 with tab1:
@@ -131,44 +344,36 @@ with tab1:
                         for item in detected_items:
                             st.write(f"✅ {item}")
                         
-                        # Show image with bounding boxes
+                        # Show image with bounding boxes if available
                         img_with_boxes = detector.draw_detections(tmp_path, detections)
-                        st.image(img_with_boxes, caption="Detected Ingredients", use_column_width=True)
+                        if img_with_boxes is not None:
+                            st.image(img_with_boxes, caption="Detected Ingredients", use_column_width=True)
                     else:
                         st.warning("No ingredients detected. Try adding manually.")
             
             # Clean up
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except:
+                pass
     
     with col2:
         st.subheader("Current Ingredients")
         if 'ingredients' in st.session_state and st.session_state.ingredients:
-            ingredients_df = pd.DataFrame({
-                'Ingredient': st.session_state.ingredients,
-                'Action': ['Remove'] * len(st.session_state.ingredients)
-            })
+            st.write(f"**You have {len(st.session_state.ingredients)} ingredients:**")
             
-            # Display as editable table
-            edited_df = st.data_editor(
-                ingredients_df,
-                column_config={
-                    "Action": st.column_config.SelectboxColumn(
-                        "Action",
-                        options=["Keep", "Remove"],
-                        required=True,
-                    )
-                },
-                use_container_width=True
-            )
-            
-            # Update ingredients based on user selection
-            if st.button("Update Ingredients"):
-                keep_items = edited_df[edited_df['Action'] == 'Keep']['Ingredient'].tolist()
-                st.session_state.ingredients = keep_items
-                st.rerun()
+            # Display as list with remove buttons
+            for idx, ingredient in enumerate(st.session_state.ingredients):
+                col_a, col_b = st.columns([4, 1])
+                with col_a:
+                    st.write(f"• {ingredient}")
+                with col_b:
+                    if st.button("🗑️", key=f"remove_{idx}"):
+                        st.session_state.ingredients.pop(idx)
+                        st.rerun()
             
             # Clear all button
-            if st.button("Clear All Ingredients"):
+            if st.button("Clear All Ingredients", key="clear_all_tab1"):
                 st.session_state.ingredients = []
                 st.rerun()
         else:
@@ -188,7 +393,7 @@ with tab2:
                     number=5
                 )
                 
-                if recipes:
+                if recipes and len(recipes) > 0:
                     st.session_state.recipes = recipes
                     
                     # Display recipes
@@ -201,16 +406,14 @@ with tab2:
                                 st.write(f"**Used Ingredients:** {recipe.get('usedIngredientCount', 'N/A')}")
                                 st.write(f"**Missing Ingredients:** {recipe.get('missedIngredientCount', 'N/A')}")
                                 
-                                # Get detailed info
-                                if 'id' in recipe:
-                                    details = recipe_finder.get_recipe_details(recipe['id'])
-                                    if details:
-                                        if 'summary' in details:
-                                            st.markdown(details['summary'].split('.')[0] + "...")
-                                        if 'readyInMinutes' in details:
-                                            st.write(f"⏱️ **Ready in:** {details['readyInMinutes']} minutes")
-                                        if 'servings' in details:
-                                            st.write(f"👥 **Servings:** {details['servings']}")
+                                # Show missed ingredients
+                                if 'missedIngredients' in recipe:
+                                    missed = [ing['name'] if isinstance(ing, dict) else ing 
+                                             for ing in recipe['missedIngredients']]
+                                    if missed:
+                                        st.write("**You need:**")
+                                        for item in missed[:3]:
+                                            st.write(f"- {item}")
                             
                             with col2:
                                 # Recipe image
@@ -220,7 +423,8 @@ with tab2:
                                 # Select button
                                 if st.button(f"Select Recipe {i+1}", key=f"select_{i}"):
                                     st.session_state.selected_recipe = recipe
-                                    st.success("Recipe selected! Check Shopping List tab.")
+                                    st.success("✅ Recipe selected! Check Shopping List tab.")
+                                    st.rerun()
                 else:
                     st.warning("No recipes found. Try different ingredients.")
     else:
@@ -233,20 +437,26 @@ with tab3:
         recipe = st.session_state.selected_recipe
         available = st.session_state.ingredients
         
+        st.write(f"**Selected Recipe:** {recipe.get('title', 'Unknown Recipe')}")
+        
         # Generate shopping list
         missing_items = shopping_list.generate_shopping_list(recipe, available)
         
-        if missing_items:
+        if isinstance(missing_items, list) and missing_items:
             st.write("### 🛍️ Items to Buy")
             
             # Categorize items
-            categorized = shopping_list._categorize_items(missing_items)
-            
-            for category, items in categorized.items():
-                if items:
-                    with st.expander(f"{category} ({len(items)} items)"):
-                        for item in items:
-                            st.write(f"☐ {item}")
+            try:
+                categorized = shopping_list._categorize_items(missing_items)
+                for category, items in categorized.items():
+                    if items:
+                        with st.expander(f"{category} ({len(items)} items)"):
+                            for item in items:
+                                st.write(f"☐ {item}")
+            except:
+                # Simple list if categorization fails
+                for item in missing_items:
+                    st.write(f"☐ {item}")
             
             # Export options
             col1, col2 = st.columns(2)
@@ -272,7 +482,9 @@ with tab3:
     else:
         st.info("Select a recipe first to generate shopping list.")
 
-# Footer
+# ============================================
+# FOOTER
+# ============================================
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #888;">
